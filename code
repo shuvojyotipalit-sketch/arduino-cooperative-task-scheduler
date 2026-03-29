@@ -1,0 +1,160 @@
+#include <DHT.h>
+#include <LiquidCrystal_I2C.h>
+// ─── Pin & sensor config 
+#define DHTPIN     2
+#define DHTTYPE    DHT22
+#define LED_PIN    13
+#define BUZZER_PIN 8
+
+DHT dht(DHTPIN, DHTTYPE);
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// ─── Shared memory 
+struct SensorData {
+  float temperature;
+  float humidity;
+  float heatIndex;
+  float minTemp;
+  float maxTemp;
+  float minHumidity;
+  float maxHumidity;
+  bool  alertActive;
+} data = {0, 0, 0, 999, -999, 999, -999, false};
+
+// Task timestamps 
+unsigned long lastSensorRead = 0;
+unsigned long lastAlertCheck = 0;
+unsigned long lastLCD        = 0;
+unsigned long lastSerial     = 0;
+
+//  Intervals (ms) 
+const unsigned long SENSOR_INTERVAL = 2000;
+const unsigned long ALERT_INTERVAL  =  500;
+const unsigned long LCD_INTERVAL    = 1000;
+const unsigned long SERIAL_INTERVAL = 2000;
+
+// Thresholds 
+const float TEMP_THRESHOLD     = 30.0;
+const float HUMIDITY_THRESHOLD = 70.0;
+// TASK 1 — Sensor read + heat index + auto-calibration
+
+void taskSensorRead() {
+  if (millis() - lastSensorRead < SENSOR_INTERVAL) return;
+  lastSensorRead = millis();
+
+  float h = dht.readHumidity();
+  float t = dht.readTemperature();
+
+  if (isnan(h) || isnan(t)) {
+    Serial.println(F("[ERROR] DHT22 read failed."));
+    return;
+  }
+
+  data.temperature = t;
+  data.humidity    = h;
+  data.heatIndex   = dht.computeHeatIndex(t, h, false);
+
+  // Auto-calibration
+  if (t < data.minTemp)     data.minTemp     = t;
+  if (t > data.maxTemp)     data.maxTemp     = t;
+  if (h < data.minHumidity) data.minHumidity = h;
+  if (h > data.maxHumidity) data.maxHumidity = h;
+}
+// TASK 2 — Alert check + LED blink + buzzer beep
+
+void taskAlertCheck() {
+  if (millis() - lastAlertCheck < ALERT_INTERVAL) return;
+  lastAlertCheck = millis();
+
+  bool tempHigh = data.temperature > TEMP_THRESHOLD;
+  bool humHigh  = data.humidity    > HUMIDITY_THRESHOLD;
+  data.alertActive = tempHigh || humHigh;
+
+  if (data.alertActive) {
+    digitalWrite(LED_PIN, !digitalRead(LED_PIN));  // blink
+
+    // Different pitch for each alert condition
+    if (tempHigh && humHigh) {
+      tone(BUZZER_PIN, 1200, 150);   // both exceeded — high pitch
+    } else if (tempHigh) {
+      tone(BUZZER_PIN, 900, 150);    // temp only — mid pitch
+    } else {
+      tone(BUZZER_PIN, 600, 150);    // humidity only — low pitch
+    }
+
+  } else {
+    digitalWrite(LED_PIN, LOW);
+    noTone(BUZZER_PIN);              // silence when all normal
+  }
+}
+// TASK 3 — LCD update
+
+void taskLCD() {
+  if (millis() - lastLCD < LCD_INTERVAL) return;
+  lastLCD = millis();
+
+  // Row 0: temperature + humidity
+  lcd.setCursor(0, 0);
+  lcd.print(F("T:"));
+  lcd.print(data.temperature, 1);
+  lcd.print(F("C  H:"));
+  lcd.print(data.humidity, 1);
+  lcd.print(F("%  "));
+
+  // Row 1: heat index + alert status
+  lcd.setCursor(0, 1);
+  lcd.print(F("HI:"));
+  lcd.print(data.heatIndex, 1);
+  lcd.print(F("C "));
+  if (data.alertActive) {
+    lcd.print(F("!!ALERT!!"));
+  } else {
+    lcd.print(F("OK       "));
+  }
+}
+
+// TASK 4 — Serial Monitor output
+
+void taskSerial() {
+  if (millis() - lastSerial < SERIAL_INTERVAL) return;
+  lastSerial = millis();
+
+  Serial.println(F("===== Environmental Monitor ====="));
+  Serial.print(F("Temperature : ")); Serial.print(data.temperature, 1); Serial.println(F(" C"));
+  Serial.print(F("Humidity    : ")); Serial.print(data.humidity,    1); Serial.println(F(" %"));
+  Serial.print(F("Heat Index  : ")); Serial.print(data.heatIndex,   1); Serial.println(F(" C"));
+  Serial.println(F("------- Observed Range ----------"));
+  Serial.print(F("Temp  min/max: "));
+  Serial.print(data.minTemp, 1); Serial.print(F(" / ")); Serial.print(data.maxTemp, 1); Serial.println(F(" C"));
+  Serial.print(F("Hum   min/max: "));
+  Serial.print(data.minHumidity, 1); Serial.print(F(" / ")); Serial.print(data.maxHumidity, 1); Serial.println(F(" %"));
+  Serial.print(F("Alert Status: "));
+  Serial.println(data.alertActive ? F("*** ALERT ***") : F("OK"));
+  Serial.println(F("=================================\n"));
+}
+
+// setup & loop
+
+void setup() {
+  Serial.begin(9600);
+  pinMode(LED_PIN,    OUTPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+  dht.begin();
+
+  lcd.init();
+  lcd.backlight();
+  lcd.setCursor(0, 0);
+  lcd.print(F("  Env Monitor   "));
+  lcd.setCursor(0, 1);
+  lcd.print(F("  Starting...   "));
+
+  delay(2000);   // one-time warmup only
+  lcd.clear();
+}
+
+void loop() {
+  taskSensorRead();   // every 2000 ms
+  taskAlertCheck();   // every  500 ms
+  taskLCD();          // every 1000 ms
+  taskSerial();       // every 2000 ms
+}
